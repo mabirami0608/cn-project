@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Send timestamped, sequenced log messages over UDP."""
+"""Send timestamped, sequenced log messages over UDP.
+
+Severity -> destination port (the SDN controller prioritises by this port):
+  CRITICAL 5001 | ERROR 5002 | WARNING, INFO 5003
+"""
 
 import argparse
 import json
@@ -29,7 +33,8 @@ def main():
     parser.add_argument("--count", type=int, default=100, help="Number of messages")
     parser.add_argument("--rate", type=float, default=20.0, help="Messages per second")
     parser.add_argument("--severity", choices=SEVERITIES + ["MIXED"], default="MIXED")
-    parser.add_argument("--sent-file", default=None, help="Defaults to sent_<client-id>.jsonl")
+    parser.add_argument("--out-dir", default=".", help="Where the sent_<id>.jsonl file goes")
+    parser.add_argument("--sent-file", default=None, help="Defaults to <out-dir>/sent_<client-id>.jsonl")
     parser.add_argument("--base-port", type=int, default=5001,
                         help="Base port; expected ports are 5001, 5002, 5003")
     args = parser.parse_args()
@@ -41,11 +46,12 @@ def main():
     if args.base_port != 5001:
         parser.error("This project currently uses UDP ports 5001, 5002, and 5003")
 
-    sent_path = Path(args.sent_file or f"sent_{args.client_id}.jsonl")
+    sent_path = Path(args.sent_file or Path(args.out_dir) / f"sent_{args.client_id}.jsonl")
     sent_path.parent.mkdir(parents=True, exist_ok=True)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     interval = 1.0 / args.rate
     sent_count = 0
+    start = time.monotonic()
 
     try:
         with sent_path.open("a", encoding="utf-8") as sent_file:
@@ -66,20 +72,20 @@ def main():
                     sock.sendto(encoded, (args.server, destination_port))
                 except OSError as exc:
                     print(f"Send failed for seq={seq}: {exc}")
-                    continue
-
-                sent_record = {
-                    "client_id": args.client_id,
-                    "seq": seq,
-                    "severity": severity,
-                    "sent_ts_ns": sent_ts_ns,
-                    "destination_port": destination_port,
-                }
-                sent_file.write(json.dumps(sent_record) + "\n")
-                sent_file.flush()
-                sent_count += 1
-                time.sleep(interval)
-
+                else:
+                    sent_file.write(json.dumps({
+                        "client_id": args.client_id,
+                        "seq": seq,
+                        "severity": severity,
+                        "sent_ts_ns": sent_ts_ns,
+                        "destination_port": destination_port,
+                    }) + "\n")
+                    sent_file.flush()
+                    sent_count += 1
+                # absolute schedule: no drift, steady rate
+                delay = start + seq * interval - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
     finally:
         sock.close()
 
