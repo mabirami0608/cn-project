@@ -7,7 +7,7 @@ from pathlib import Path
 from statistics import mean
 
 SEV = ("CRITICAL", "ERROR", "WARNING", "INFO")
-root = Path(sys.argv[1] if len(sys.argv) > 1 else "results")
+root = Path(sys.argv[1] if len(sys.argv) > 1 else "results/experiments")
 
 runs = defaultdict(list)
 for meta_path in sorted(root.glob("*/meta.json")):
