@@ -3,22 +3,18 @@
 - Learns MAC addresses (like simple_switch_13).
 - Polls port stats of the bottleneck port (s1 port 6) every POLL seconds.
 - When utilization >= HIGH, installs high-priority flows that send each
-  log severity port into its own OVS queue (needs topology.setup_qos()).
+  log severity port into its own OVS queue.
 - When utilization < LOW, removes those flows again.
-- Records network-flow statistics to CSV files in $SDN_OUT:
-    sdn_stats.csv       per-poll bottleneck utilisation / drops / state
-    sdn_flow_stats.csv  per-rule packet/byte counters of the priority flows
-    sdn_events.csv      CONGESTION / CLEARED events with timestamps
 
-Run:
-    ryu-manager controller.py                 # prioritisation ON
-    PRIORITY=0 ryu-manager controller.py      # baseline run (no prioritisation)
-Environment: PRIORITY, SDN_OUT, LINK_BPS, POLL
+Set PRIORITY=0 in the environment to disable prioritization (baseline run):
+    PRIORITY=0 ryu-manager sdn/controller.py
+
+If SDN_OUT is set to a folder, utilization samples and congestion events are
+appended to <SDN_OUT>/events.jsonl (used by analyze.py for the reaction time).
 """
-import csv
+import json
 import os
 import time
-from pathlib import Path
 
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -30,16 +26,15 @@ from ryu.ofproto import ofproto_v1_3
 
 BOTTLENECK_DPID = 1          # s1
 BOTTLENECK_PORT = 6          # s1-eth6 -> s2
-LINK_BPS = int(os.environ.get("LINK_BPS", 2000000))
+LINK_BPS = 2000000
 HIGH = 0.70                  # congested above 70% utilization
 LOW = 0.30                   # recovered below 30%
-POLL = float(os.environ.get("POLL", 1))   # seconds
+POLL = 2                     # seconds
 SERVER_IP = "10.0.0.5"
 COOKIE = 0xABCD
 PRIORITY_FLOW = 100
-# UDP dst port -> OVS queue id (queues are created by topology.setup_qos)
+# UDP dst port -> OVS queue id
 QUEUE_MAP = {5001: 1, 5002: 2, 5003: 0}
-OUT_DIR = Path(os.environ.get("SDN_OUT", "."))
 
 
 class LogPriorityController(app_manager.RyuApp):
@@ -52,19 +47,22 @@ class LogPriorityController(app_manager.RyuApp):
         self.congested = False
         self.prev = None
         self.enabled = os.environ.get("PRIORITY", "1") == "1"
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_dir = os.environ.get("SDN_OUT")
+        self.events_path = os.path.join(out_dir, "events.jsonl") if out_dir else None
         self.logger.info("Prioritization %s",
                          "ENABLED" if self.enabled else "DISABLED (baseline)")
         hub.spawn(self._monitor)
 
-    def _csv(self, name, header, row):
-        path = OUT_DIR / name
-        new = not path.exists()
-        with path.open("a", newline="") as handle:
-            writer = csv.writer(handle)
-            if new:
-                writer.writerow(header)
-            writer.writerow(row)
+    def _event(self, name, **fields):
+        """Append one event line to events.jsonl (only when SDN_OUT is set)."""
+        if not self.events_path:
+            return
+        record = {"ts_ns": time.time_ns(), "event": name, **fields}
+        try:
+            with open(self.events_path, "a") as handle:
+                handle.write(json.dumps(record) + "\n")
+        except OSError:
+            pass
 
     # ---------- switch connection ----------
     @set_ev_cls(ofp_event.EventOFPStateChange,
@@ -126,14 +124,9 @@ class LogPriorityController(app_manager.RyuApp):
             dp = self.datapaths.get(BOTTLENECK_DPID)
             if dp is None:
                 continue
-            ofp, parser = dp.ofproto, dp.ofproto_parser
-            dp.send_msg(parser.OFPPortStatsRequest(
-                dp, 0, port_no=BOTTLENECK_PORT))
-            # flow statistics of the dynamic priority rules
-            dp.send_msg(parser.OFPFlowStatsRequest(
-                dp, 0, table_id=ofp.OFPTT_ALL, out_port=ofp.OFPP_ANY,
-                out_group=ofp.OFPG_ANY, cookie=COOKIE,
-                cookie_mask=0xFFFFFFFFFFFFFFFF, match=parser.OFPMatch()))
+            req = dp.ofproto_parser.OFPPortStatsRequest(
+                dp, 0, port_no=BOTTLENECK_PORT)
+            dp.send_msg(req)
 
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats(self, ev):
@@ -151,28 +144,9 @@ class LogPriorityController(app_manager.RyuApp):
                 self.logger.info("bottleneck util=%3.0f%% (%.0f kbps) "
                                  "congested=%s", util * 100, bps / 1000,
                                  self.congested)
-                self._csv("sdn_stats.csv",
-                          ["ts_ns", "util_pct", "kbps", "tx_packets",
-                           "tx_dropped", "congested"],
-                          [time.time_ns(), round(util * 100, 1),
-                           round(bps / 1000, 1), stat.tx_packets,
-                           stat.tx_dropped, int(self.congested)])
+                self._event("util", util=round(util, 3), kbps=round(bps / 1000))
                 self._evaluate(dp, util)
             self.prev = (stat.tx_bytes, now)
-
-    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
-    def _flow_stats(self, ev):
-        dp = ev.msg.datapath
-        if dp.id != BOTTLENECK_DPID:
-            return
-        for stat in ev.msg.body:
-            if stat.cookie != COOKIE:
-                continue
-            udp_port = stat.match.get("udp_dst")
-            self._csv("sdn_flow_stats.csv",
-                      ["ts_ns", "udp_dst", "queue", "packets", "bytes"],
-                      [time.time_ns(), udp_port, QUEUE_MAP.get(udp_port),
-                       stat.packet_count, stat.byte_count])
 
     def _evaluate(self, dp, util):
         if not self.enabled:
@@ -181,15 +155,13 @@ class LogPriorityController(app_manager.RyuApp):
             self.congested = True
             self.logger.warning("CONGESTION detected -> installing "
                                 "priority rules")
-            self._csv("sdn_events.csv", ["ts_ns", "event", "util_pct"],
-                      [time.time_ns(), "CONGESTION", round(util * 100, 1)])
+            self._event("congestion_detected")
             self._install_priority(dp)
         elif self.congested and util < LOW:
             self.congested = False
             self.logger.warning("Congestion cleared -> removing "
                                 "priority rules")
-            self._csv("sdn_events.csv", ["ts_ns", "event", "util_pct"],
-                      [time.time_ns(), "CLEARED", round(util * 100, 1)])
+            self._event("congestion_cleared")
             self._remove_priority(dp)
 
     # ---------- dynamic rules ----------
