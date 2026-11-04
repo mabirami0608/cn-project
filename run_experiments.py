@@ -7,7 +7,7 @@ under several congestion levels.  Run as root:
 
 For every (noise level, mode) it starts ryu-manager, builds the Mininet
 topology, runs the log server, 4 log clients and the UDP noise generator,
-then stores everything in results/noise<N>_<mode>_r<K>/.
+then stores everything in results/experiments/noise<N>_<mode>_r<K>/.
 """
 import argparse
 import json
@@ -18,17 +18,30 @@ import sys
 import time
 from pathlib import Path
 
+HERE = Path(__file__).resolve().parent
+ROOT = HERE if (HERE / "app").exists() else HERE.parent
+SEARCH_DIRS = [HERE, ROOT / "app", ROOT / "sdn", ROOT / "tests"]
+for _d in SEARCH_DIRS:
+    sys.path.insert(0, str(_d))
+
 from mininet.clean import cleanup
 from mininet.log import setLogLevel
 
 from topology import CLIENTS, SERVER_IP, SINK_IP, build_network, clear_qos, setup_qos
 
-HERE = Path(__file__).resolve().parent
 PY = sys.executable
 
 
+def locate(name):
+    """Find a project script whether the repo is flat or split into app/, sdn/, tests/."""
+    for d in SEARCH_DIRS:
+        if (d / name).exists():
+            return d / name
+    raise FileNotFoundError(name)
+
+
 def host_popen(host, script, *args, log):
-    cmd = [PY, "-u", str(HERE / script), *map(str, args)]
+    cmd = [PY, "-u", str(locate(script)), *map(str, args)]
     return host.popen(cmd, stdout=open(log, "w"), stderr=subprocess.STDOUT)
 
 
@@ -39,7 +52,7 @@ def run_one(noise, priority, repeat, args):
     print(f"\n=== noise={noise} Mbps  mode={mode}  repeat={repeat}  -> {out}")
 
     env = dict(os.environ, PRIORITY="1" if priority else "0", SDN_OUT=str(out))
-    ryu = subprocess.Popen(["ryu-manager", str(HERE / "controller.py")], env=env,
+    ryu = subprocess.Popen(["ryu-manager", str(locate("controller.py"))], env=env,
                            stdout=open(out / "controller.log", "w"), stderr=subprocess.STDOUT)
     time.sleep(3)
     net = None
@@ -58,6 +71,7 @@ def run_one(noise, priority, repeat, args):
         time.sleep(1)
 
         count = int(args.duration * args.rate)
+        noise_start_ns = time.time_ns() if noise > 0 else None
         noise_len = args.warmup + 0.75 * args.duration     # leave a quiet tail -> "congestion cleared"
         if noise > 0:
             procs.append(host_popen(hosts["h6"], "traffic_gen.py", "send", "--dst", SINK_IP,
@@ -77,7 +91,8 @@ def run_one(noise, priority, repeat, args):
         (out / "meta.json").write_text(json.dumps(
             {"noise_mbps": noise, "mode": mode, "repeat": repeat,
              "duration": args.duration, "rate_per_client": args.rate,
-             "clients": len(CLIENTS), "warmup": args.warmup}))
+             "clients": len(CLIENTS), "warmup": args.warmup,
+             "noise_start_ns": noise_start_ns}))
     finally:
         for p in procs:
             if p.poll() is None:
@@ -90,7 +105,7 @@ def run_one(noise, priority, repeat, args):
         cleanup()
 
     with open(out / "analysis.txt", "w") as report:
-        subprocess.run([PY, str(HERE / "analyze.py"), "--dir", str(out),
+        subprocess.run([PY, str(locate("analyze.py")), "--dir", str(out),
                         "--json", str(out / "summary.json")], stdout=report)
     print((out / "analysis.txt").read_text())
 
@@ -104,7 +119,7 @@ def main():
     parser.add_argument("--rate", type=float, default=20, help="Log messages/s per client")
     parser.add_argument("--warmup", type=float, default=6,
                         help="Seconds noise runs before clients start (lets the controller react)")
-    parser.add_argument("--out", default="results")
+    parser.add_argument("--out", default="results/experiments")
     args = parser.parse_args()
     if os.geteuid() != 0:
         sys.exit("Run with sudo (Mininet needs root).")
@@ -114,7 +129,7 @@ def main():
         for noise in args.noise:
             for priority in (False, True):
                 run_one(noise, priority, r, args)
-    subprocess.run([PY, str(HERE / "compare.py"), args.out])
+    subprocess.run([PY, str(locate("compare.py")), args.out])
 
 
 if __name__ == "__main__":
