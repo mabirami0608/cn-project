@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Compare client send records with server receive records."""
+"""Compare client send records with server receive records.
+
+Works on one run folder (--dir) or on explicit file paths. With --json it also
+writes a machine-readable summary that compare.py uses to build the
+baseline-vs-SDN table.
+"""
 
 import argparse
-import csv
 import glob
 import json
+import math
 from collections import defaultdict
 from pathlib import Path
 
@@ -26,45 +31,73 @@ def read_jsonl(path):
 
 
 def percentile(values, pct):
+    """Nearest-rank percentile, or None for an empty list."""
+    if not values:
+        return None
     ordered = sorted(values)
-    k = (len(ordered) - 1) * pct / 100
-    lo = int(k)
-    hi = min(lo + 1, len(ordered) - 1)
-    return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
+    rank = max(1, math.ceil(pct / 100 * len(ordered)))
+    return ordered[rank - 1]
 
 
-def stats(latencies):
-    if not latencies:
-        return None, None, None
-    return sum(latencies) / len(latencies), percentile(latencies, 95), max(latencies)
+def make_stats(sent_count, latencies, received_count):
+    lost = max(0, sent_count - received_count)
+    return {
+        "sent": sent_count,
+        "received": received_count,
+        "lost": lost,
+        "loss_pct": round(100.0 * lost / sent_count, 3) if sent_count else 0.0,
+        "avg_ms": round(sum(latencies) / len(latencies), 3) if latencies else None,
+        "p95_ms": round(percentile(latencies, 95), 3) if latencies else None,
+    }
+
+
+def sdn_reaction_seconds(base):
+    """Seconds from the start of background traffic to the controller's
+    'congestion detected' event. Needs meta.json and events.jsonl in the run folder."""
+    meta_path = Path(base) / "meta.json"
+    events_path = Path(base) / "events.jsonl"
+    if not meta_path.exists() or not events_path.exists():
+        return None
+    start = json.loads(meta_path.read_text()).get("noise_start_ns")
+    if not start:
+        return None
+    for event in read_jsonl(events_path):
+        if event.get("event") == "congestion_detected":
+            return round((event["ts_ns"] - start) / 1e9, 2)
+    return None
 
 
 def fmt(value):
-    return f"{value:.1f}" if value is not None else "n/a"
+    return f"{value:.3f} ms" if value is not None else "n/a"
 
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze UDP log delivery")
-    parser.add_argument("--dir", default=".", help="Run directory (all other paths are relative to it)")
-    parser.add_argument("--sent-glob", default="sent_*.jsonl",
-                        help='Glob for client send records (default: "sent_*.jsonl")')
-    parser.add_argument("--received", default="logs.jsonl")
-    parser.add_argument("--malformed", default="malformed.jsonl")
-    parser.add_argument("--json", default=None, help="Write machine-readable summary here")
+    parser.add_argument("--dir", default=None,
+                        help="run folder holding sent_*.jsonl, logs.jsonl and malformed.jsonl")
+    parser.add_argument("--sent-glob", default=None,
+                        help='glob for client send records (default: "<dir>/sent_*.jsonl")')
+    parser.add_argument("--received", default=None, help="default: <dir>/logs.jsonl")
+    parser.add_argument("--malformed", default=None, help="default: <dir>/malformed.jsonl")
+    parser.add_argument("--json", default=None, help="also write a JSON summary to this path")
     args = parser.parse_args()
 
-    base = Path(args.dir)
-    sent_paths = sorted(glob.glob(str(base / args.sent_glob)))
+    base = Path(args.dir) if args.dir else Path(".")
+    sent_glob = args.sent_glob or str(base / "sent_*.jsonl")
+    received_path = args.received or str(base / "logs.jsonl")
+    malformed_path = args.malformed or str(base / "malformed.jsonl")
+
+    sent_paths = sorted(glob.glob(sent_glob))
     if not sent_paths:
-        print(f"No sent records found for pattern: {base / args.sent_glob}")
-        print("Run the client first, or pass --dir/--sent-glob with the correct path/pattern.")
+        print(f"No sent records found for pattern: {sent_glob}")
+        print("Run the client first, or pass --dir / --sent-glob with the correct path.")
         return
 
     sent = []
     for path in sent_paths:
         sent.extend(read_jsonl(path))
-    received = read_jsonl(base / args.received)
-    malformed = read_jsonl(base / args.malformed)
+    received = read_jsonl(received_path)
+    malformed = read_jsonl(malformed_path)
 
     sent_keys = set()
     sent_by_severity = defaultdict(set)
@@ -74,18 +107,15 @@ def main():
         sent_by_severity[record.get("severity", "UNKNOWN")].add(key)
 
     received_by_severity = defaultdict(dict)
-    duplicates = 0
     for record in received:
         key = (record.get("client_id"), record.get("seq"))
         if key in sent_keys:
-            bucket = received_by_severity[record.get("severity", "UNKNOWN")]
-            duplicates += key in bucket
-            bucket[key] = record
+            received_by_severity[record.get("severity", "UNKNOWN")][key] = record
 
     print("\nUDP LOG DELIVERY SUMMARY")
     print("=" * 92)
-    print(f'{"Severity":<10} {"Sent":>7} {"Recv":>7} {"Lost":>6} {"Loss %":>8} '
-          f'{"Avg ms":>9} {"P95 ms":>9} {"Max ms":>9}')
+    print(f'{"Severity":<10} {"Sent":>7} {"Received":>9} {"Lost":>7} {"Loss %":>8} '
+          f'{"Avg delay":>13} {"P95 delay":>13}')
     print("-" * 92)
 
     summary = {"severity": {}}
@@ -94,48 +124,30 @@ def main():
     for severity in SEVERITIES:
         sent_count = len(sent_by_severity[severity])
         records = received_by_severity[severity]
-        received_count = len(records)
-        lost = max(0, sent_count - received_count)
-        loss_pct = 100.0 * lost / sent_count if sent_count else 0.0
-        lats = [r["latency_ms"] for r in records.values()
-                if isinstance(r.get("latency_ms"), (int, float))]
-        avg, p95, mx = stats(lats)
-        print(f"{severity:<10} {sent_count:>7} {received_count:>7} {lost:>6} {loss_pct:>7.2f}% "
-              f"{fmt(avg):>9} {fmt(p95):>9} {fmt(mx):>9}")
-        summary["severity"][severity] = {
-            "sent": sent_count, "received": received_count, "lost": lost,
-            "loss_pct": round(loss_pct, 3), "avg_ms": avg, "p95_ms": p95, "max_ms": mx}
+        latencies = [r["latency_ms"] for r in records.values()
+                     if isinstance(r.get("latency_ms"), (int, float))]
+        stats = make_stats(sent_count, latencies, len(records))
+        summary["severity"][severity] = stats
+        print(f'{severity:<10} {stats["sent"]:>7} {stats["received"]:>9} {stats["lost"]:>7} '
+              f'{stats["loss_pct"]:>7.2f}% {fmt(stats["avg_ms"]):>13} {fmt(stats["p95_ms"]):>13}')
         total_sent += sent_count
-        total_received += received_count
-        all_latencies.extend(lats)
+        total_received += len(records)
+        all_latencies.extend(latencies)
 
-    total_lost = max(0, total_sent - total_received)
-    total_loss_pct = 100.0 * total_lost / total_sent if total_sent else 0.0
-    avg_all, p95_all, max_all = stats(all_latencies)
-    summary["total"] = {"sent": total_sent, "received": total_received, "lost": total_lost,
-                        "loss_pct": round(total_loss_pct, 3), "avg_ms": avg_all,
-                        "p95_ms": p95_all, "max_ms": max_all,
-                        "malformed": len(malformed), "duplicates": duplicates}
+    total = make_stats(total_sent, all_latencies, total_received)
+    summary["total"] = total
+    summary["malformed"] = len(malformed)
+    summary["sdn_reaction_s"] = sdn_reaction_seconds(base)
+
     print("-" * 92)
-    print(f"TOTAL sent={total_sent}, received={total_received}, lost={total_lost}, loss={total_loss_pct:.2f}%")
-    print(f"Average delivery time: {fmt(avg_all)} ms   (P95 {fmt(p95_all)} ms, max {fmt(max_all)} ms)")
-    print(f"Malformed packets rejected by server: {len(malformed)}   Duplicates: {duplicates}")
-
-    # SDN reaction time: first send -> first CONGESTION event from the controller
-    events = base / "sdn_events.csv"
-    if events.exists() and sent:
-        first_sent = min(r["sent_ts_ns"] for r in sent if "sent_ts_ns" in r)
-        with events.open() as handle:
-            rows = list(csv.DictReader(handle))
-        cong = [int(r["ts_ns"]) for r in rows if r["event"] == "CONGESTION"]
-        if cong:
-            react = (cong[0] - first_sent) / 1e9
-            summary["sdn_reaction_s"] = round(react, 2)
-            print(f"Controller detected congestion {react:.1f} s after the first log was sent "
-                  f"({len(cong)} congestion event(s)).")
-
+    print(f'TOTAL sent={total["sent"]}, received={total["received"]}, '
+          f'lost={total["lost"]}, loss={total["loss_pct"]:.2f}%')
+    print(f'Average delivery time: {fmt(total["avg_ms"])}')
+    print(f"Malformed packets rejected by server: {len(malformed)}")
+    if summary["sdn_reaction_s"] is not None:
+        print(f'Controller reaction time: {summary["sdn_reaction_s"]} s after background traffic started')
     print("\nNote: delivery time uses sender and receiver wall-clock timestamps.")
-    print("All Mininet hosts share one machine clock, so this is accurate here.")
+    print("All Mininet hosts share one clock, so the values are comparable.")
     print("Loss is estimated by matching (client_id, seq); UDP does not guarantee delivery.")
 
     if args.json:
