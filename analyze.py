@@ -24,7 +24,7 @@ def read_jsonl(path):
     with file_path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             try:
-                records.append(json.loads(line))
+                records.append(json.loads(line))#json ->dictionary
             except json.JSONDecodeError:
                 print(f"Warning: skipping invalid JSON in {path}:{line_number}")
     return records
@@ -45,9 +45,9 @@ def make_stats(sent_count, latencies, received_count):
         "sent": sent_count,
         "received": received_count,
         "lost": lost,
-        "loss_pct": round(100.0 * lost / sent_count, 3) if sent_count else 0.0,
-        "avg_ms": round(sum(latencies) / len(latencies), 3) if latencies else None,
-        "p95_ms": round(percentile(latencies, 95), 3) if latencies else None,
+        "loss_pct": round(100.0 * lost / sent_count, 3) if sent_count else 0.0,#packet loss percentage
+        "avg_ms": round(sum(latencies) / len(latencies), 3) if latencies else None,#average delivery delay
+        "p95_ms": round(percentile(latencies, 95), 3) if latencies else None,#95th percentile delay
     }
 
 
@@ -96,15 +96,16 @@ def main():
     sent = []
     for path in sent_paths:
         sent.extend(read_jsonl(path))
+        #combines them into a final list
     received = read_jsonl(received_path)
     malformed = read_jsonl(malformed_path)
 
     sent_keys = set()
     sent_by_severity = defaultdict(set)
     for record in sent:
-        key = (record.get("client_id"), record.get("seq"))
+        key = (record.get("client_id"), record.get("seq"))#Creates a unique identifier using the client ID and sequence number
         sent_keys.add(key)
-        sent_by_severity[record.get("severity", "UNKNOWN")].add(key)
+        sent_by_severity[record.get("severity", "UNKNOWN")].add(key)#groups according to severity
 
     received_by_severity = defaultdict(dict)
     for record in received:
