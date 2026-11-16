@@ -2,7 +2,7 @@
 
 Mininet + Ryu project. Several hosts send logs over UDP to one log server. The path to the server has a 2 Mbps bottleneck. A Ryu (OpenFlow 1.3) controller watches that link and, when it gets congested, puts the more important logs into higher-priority queues. We measure loss and delivery time with and without this.
 
-Team: [Name 1 (SRN)], [Name 2 (SRN)], [Name 3 (SRN)]
+Team: ABIRAMI M[PES1UG25CS019] ADVAITH[PES1UG25CS040] ANANTH ANAND[PES1UG25CS061]
 
 ## Files
 
