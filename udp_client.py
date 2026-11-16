@@ -44,7 +44,8 @@ def main():
 
     sent_path = Path(args.sent_file) if args.sent_file else Path(args.out_dir) / f"sent_{args.client_id}.jsonl"
     sent_path.parent.mkdir(parents=True, exist_ok=True)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)   #to create udp socket with ipv4 addressing
+    
     interval = 1.0 / args.rate
     sent_count = 0
     next_send = time.monotonic()
@@ -62,7 +63,7 @@ def main():
                     "event_ts_ns": sent_ts_ns,
                     "message": MESSAGES[severity],
                 }
-                encoded = json.dumps(packet, separators=(",", ":")).encode("utf-8")
+                encoded = json.dumps(packet, separators=(",", ":")).encode("utf-8") #python dictionary->json text->bytes
                 destination_port = PORT_BY_SEVERITY[severity]
                 try:
                     sock.sendto(encoded, (args.server, destination_port))
