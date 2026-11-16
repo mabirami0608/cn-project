@@ -43,6 +43,7 @@ def _stop(signum, frame):
 
 
 def main():
+    #server arguements
     parser = argparse.ArgumentParser(description="Central UDP log server")
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--out-dir", default=".",
@@ -51,7 +52,8 @@ def main():
     parser.add_argument("--run-time", type=float, default=0,
                         help="stop after N seconds (0 = run until Ctrl+C)")
     args = parser.parse_args()
-
+    
+    #creates output file if necessary
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "logs.jsonl"
@@ -59,6 +61,7 @@ def main():
     malformed_path = out_dir / "malformed.jsonl"
     signal.signal(signal.SIGTERM, _stop)
 
+    #creating sockets for each port
     sockets = []
     for port in PORTS:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -70,7 +73,7 @@ def main():
     print("UDP log server running. Press Ctrl+C to stop.", flush=True)
     deadline = time.monotonic() + args.run_time if args.run_time else None
     accepted = rejected = 0
-
+#TO RECIEVE PACKETS
     try:
         with log_path.open("a", encoding="utf-8") as json_log, \
              text_log_path.open("a", encoding="utf-8") as text_log, \
@@ -82,13 +85,14 @@ def main():
                     if remaining <= 0:
                         break
                     timeout = min(timeout, remaining)
-                readable, _, _ = select.select(sockets, [], [], timeout)
+                readable, _, _ = select.select(sockets, [], [], timeout)#Checks multiple ports at a time tto tell us which is capable of recieving the data
                 for sock in readable:
                     data, address = sock.recvfrom(65535)
                     received_ts_ns = time.time_ns()
                     port = sock.getsockname()[1]
                     try:
-                        packet = json.loads(data.decode("utf-8"))
+                        packet = json.loads(data.decode("utf-8"))#bytes into UTF-8 text
+                        #if something is not right
                         ok, reason = valid_packet(packet, port)
                     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                         packet = None
@@ -109,7 +113,7 @@ def main():
                         print(f"Rejected malformed packet from {address}: {reason}", flush=True)
                         continue
 
-                    latency_ms = (received_ts_ns - packet["event_ts_ns"]) / 1_000_000
+                    latency_ms = (received_ts_ns - packet["event_ts_ns"]) / 1_000_000 #time taken between the sender's event timestamp and the server's receiving timestamp
                     record = {
                         **packet,
                         "source_ip": address[0],
