@@ -7,7 +7,7 @@ baseline-vs-SDN table.
 """
 
 import argparse
-import glob
+import glob #find patterns
 import json
 import math
 from collections import defaultdict
