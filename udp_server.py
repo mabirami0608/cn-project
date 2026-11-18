@@ -56,9 +56,10 @@ def main():
     #creates output file if necessary
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    log_path = out_dir / "logs.jsonl"
-    text_log_path = out_dir / "logs.txt"
-    malformed_path = out_dir / "malformed.jsonl"
+    log_path = out_dir / "logs.jsonl" #valid packet recieved in jsonl format
+    text_log_path = out_dir / "logs.txt"#valid packets in human readble form
+    malformed_path = out_dir / "malformed.jsonl"#rejected packets
+    
     signal.signal(signal.SIGTERM, _stop)
 
     #creating sockets for each port
@@ -71,7 +72,7 @@ def main():
         print(f"Listening on UDP port {port}")
 
     print("UDP log server running. Press Ctrl+C to stop.", flush=True)
-    deadline = time.monotonic() + args.run_time if args.run_time else None
+    deadline = time.monotonic() + args.run_time if args.run_time else None#main recieving loop
     accepted = rejected = 0
 #TO RECIEVE PACKETS
     try:
@@ -88,7 +89,7 @@ def main():
                 readable, _, _ = select.select(sockets, [], [], timeout)#Checks multiple ports at a time tto tell us which is capable of recieving the data
                 for sock in readable:
                     data, address = sock.recvfrom(65535)
-                    received_ts_ns = time.time_ns()
+                    received_ts_ns = time.time_ns()#records time stamps
                     port = sock.getsockname()[1]
                     try:
                         packet = json.loads(data.decode("utf-8"))#bytes into UTF-8 text
